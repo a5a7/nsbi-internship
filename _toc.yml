@@ -1,0 +1,28 @@
+format: jb-book
+root: README
+
+
+parts:
+  - caption: Logistics
+    chapters:
+    - file: pages/overview.md
+    - file: pages/registration.md
+    - file: pages/code-of-conduct.md
+    - file: pages/schedule.md
+  - caption: Day 1
+    chapters:
+    - file: sessions/day1/day1.md
+    - file: sessions/day1/intro_ml_tutorial_part1.ipynb
+    - file: sessions/day1/intro_ml_tutorial_part2.ipynb
+  - caption: Day 2
+    chapters:
+    - file: sessions/day2/day2.md
+  - caption: Day 3
+    chapters:
+    - file: sessions/day3/day3.md
+  - caption: Day 4
+    chapters:
+    - file: sessions/day4/day4.md
+  - caption: Day 5
+    chapters:
+    - file: sessions/day5/day5.md
