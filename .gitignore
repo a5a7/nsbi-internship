@@ -1,0 +1,9 @@
+
+.DS_Store
+images/.DS_Store
+*/.DS_Store
+*/.ipynb_checkpoints/
+.vscode/
+
+# exclude the build dir
+_build/
