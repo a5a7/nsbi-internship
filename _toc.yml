@@ -1,5 +1,5 @@
 format: jb-book
-root: README
+root: home
 
 
 parts:
@@ -20,6 +20,8 @@ parts:
   - caption: Day 3
     chapters:
     - file: sessions/day3/day3.md
+    - file: sessions/day3/transformers_tutorial_part1.ipynb
+    - file: sessions/day3/transformers_tutorial_part2.ipynb
   - caption: Day 4
     chapters:
     - file: sessions/day4/day4.md

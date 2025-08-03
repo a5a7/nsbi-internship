@@ -4,7 +4,7 @@ author: Organizing team
 copyright: "ML4FP 2025"
 logo: images/ml4fp_2025_logo.png
 execute:
-  execute_notebooks: force
+  execute_notebooks: off
 
 # Add a bibtex file so that we can create citations
 bibtex_bibfiles:
