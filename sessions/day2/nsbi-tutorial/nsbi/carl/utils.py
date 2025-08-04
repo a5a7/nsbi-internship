@@ -28,17 +28,6 @@ def load_results(run_dir, run_name = 'carl'):
     carl_dir = os.path.join(run_dir, run_name)
     logs_dir = os.path.join(carl_dir, 'lightning_logs')
 
-    with open(os.path.join(carl_dir, 'events_numerator_val.pkl'), 'rb') as f:
-        events_num_val = pickle.load(f)
-    with open(os.path.join(carl_dir, 'events_denominator_val.pkl'), 'rb') as f:
-        events_denom_val = pickle.load(f)
-    with open(os.path.join(carl_dir, 'events_numerator_test.pkl'), 'rb') as f:
-        events_num_test = pickle.load(f)
-    with open(os.path.join(carl_dir, 'events_denominator_test.pkl'), 'rb') as f:
-        events_denom_test = pickle.load(f)
-    with open(os.path.join(carl_dir, 'scaler.pkl'), 'rb') as f:
-        scaler = pickle.load(f)
-
     # Find the latest version folder
     versions = [d for d in os.listdir(logs_dir) if re.match(r'version_\d+', d)]
     if not versions:
@@ -58,7 +47,7 @@ def load_results(run_dir, run_name = 'carl'):
 
     ckpt = CARL.load_from_checkpoint(checkpoint_path=os.path.join(checkpoint_dir, ckpt_path))
 
-    return (events_num_val, events_num_test), (events_denom_val, events_denom_test), scaler, ckpt
+    return scaler, ckpt
 
 def get_likelihood_ratio(events, features, scaler_X, model):
     trainer = L.Trainer(accelerator='gpu', devices=1, enable_progress_bar=False)
