@@ -28,6 +28,9 @@ def load_results(run_dir, run_name = 'carl'):
     carl_dir = os.path.join(run_dir, run_name)
     logs_dir = os.path.join(carl_dir, 'lightning_logs')
 
+    with open(os.path.join(carl_dir, 'scaler.pkl'), 'rb') as f:
+        scaler = pickle.load(f)
+
     # Find the latest version folder
     versions = [d for d in os.listdir(logs_dir) if re.match(r'version_\d+', d)]
     if not versions:
