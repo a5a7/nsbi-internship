@@ -124,3 +124,54 @@ class Trainer:
                 labels.append(batch["y"])
                 preds.append(self.model(X).softmax(-1))
         return torch.cat(preds).cpu().numpy(), torch.cat(labels).cpu().numpy()
+
+
+def restore_checkpoint(
+    model,
+    checkpoint_dir,
+    checkpoint_name,
+    device=0,
+):
+    device = "cuda:{}".format(device) if torch.cuda.is_available() else "cpu"
+    checkpoint = torch.load(
+        os.path.join(checkpoint_dir, checkpoint_name),
+        map_location=device,
+    )
+
+
+    base_model = model.module if hasattr(model, "module") else model
+    base_model.to(device)
+        
+    if base_model.body is not None and "body" in checkpoint:
+        body_state = checkpoint["body"]
+        model_state = base_model.body.state_dict()
+        filtered_state = {}
+        for k, v in body_state.items():        
+            if k in model_state and model_state[k].shape == v.shape:
+                filtered_state[k] = v
+            else:
+                print(
+                    f"Skipping {k}: shape mismatch (checkpoint: {v.shape}, model: {model_state[k].shape if k in model_state else 'missing'})"
+                )
+
+        base_model.body.load_state_dict(filtered_state, strict=False)
+
+    if base_model.classifier is not None and "classifier_head" in checkpoint:
+        classifier_state = checkpoint["classifier_head"]
+        model_state = base_model.classifier.state_dict()
+        filtered_state = {}
+        for k, v in classifier_state.items():
+            if "out." in k:
+                print(f"Skipping {k}: explicitly excluded from loading")
+                continue
+        
+            if k in model_state and model_state[k].shape == v.shape:
+                filtered_state[k] = v
+            else:
+                print(
+                        f"Skipping {k}: shape mismatch (checkpoint: {v.shape}, model: {model_state[k].shape if k in model_state else 'missing'})"
+                )
+        base_model.classifier.load_state_dict(filtered_state, strict=False)
+
+
+    
