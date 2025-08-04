@@ -12,16 +12,16 @@ def load_data(run_dir, run_name = 'carl'):
 
     carl_dir = os.path.join(run_dir, run_name)
 
+    with open(os.path.join(carl_dir, 'events_numerator_train.pkl'), 'rb') as f:
+        events_num_train = pickle.load(f)
+    with open(os.path.join(carl_dir, 'events_denominator_train.pkl'), 'rb') as f:
+        events_denom_train = pickle.load(f)
     with open(os.path.join(carl_dir, 'events_numerator_val.pkl'), 'rb') as f:
         events_num_val = pickle.load(f)
     with open(os.path.join(carl_dir, 'events_denominator_val.pkl'), 'rb') as f:
         events_denom_val = pickle.load(f)
-    with open(os.path.join(carl_dir, 'events_numerator_test.pkl'), 'rb') as f:
-        events_num_test = pickle.load(f)
-    with open(os.path.join(carl_dir, 'events_denominator_test.pkl'), 'rb') as f:
-        events_denom_test = pickle.load(f)
 
-    return (events_num_val, events_num_test), (events_denom_val, events_denom_test)
+    return (events_num_train, events_num_val), (events_denom_train, events_denom_val)
 
 def load_results(run_dir, run_name = 'carl'):
 
@@ -41,7 +41,7 @@ def load_results(run_dir, run_name = 'carl'):
     checkpoint_dir = os.path.join(logs_dir, latest_version, 'checkpoints')
 
     # Find all checkpoint files matching the pattern
-    checkpoints = [f for f in os.listdir(checkpoint_dir) if re.match(r'epoch=\d+-val_loss=.+\.ckpt', f)]
+    checkpoints = [f for f in os.listdir(checkpoint_dir) if re.match(r'epoch=\d+-train_loss=.+\.ckpt', f)]
     if not checkpoints:
         raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
 
