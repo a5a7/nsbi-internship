@@ -8,6 +8,21 @@ import torch
 from torch.utils.data import TensorDataset, DataLoader
 import lightning as L
 
+def load_data(run_dir, run_name = 'carl'):
+
+    carl_dir = os.path.join(run_dir, run_name)
+
+    with open(os.path.join(carl_dir, 'events_numerator_val.pkl'), 'rb') as f:
+        events_num_val = pickle.load(f)
+    with open(os.path.join(carl_dir, 'events_denominator_val.pkl'), 'rb') as f:
+        events_denom_val = pickle.load(f)
+    with open(os.path.join(carl_dir, 'events_numerator_test.pkl'), 'rb') as f:
+        events_num_test = pickle.load(f)
+    with open(os.path.join(carl_dir, 'events_denominator_test.pkl'), 'rb') as f:
+        events_denom_test = pickle.load(f)
+
+    return (events_num_val, events_num_test), (events_denom_val, events_denom_test)
+
 def load_results(run_dir, run_name = 'carl'):
 
     carl_dir = os.path.join(run_dir, run_name)
