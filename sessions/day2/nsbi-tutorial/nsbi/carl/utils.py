@@ -41,16 +41,22 @@ def load_results(run_dir, run_name = 'carl'):
     checkpoint_dir = os.path.join(logs_dir, latest_version, 'checkpoints')
 
     # Find all checkpoint files matching the pattern
-    checkpoints = [f for f in os.listdir(checkpoint_dir) if re.match(r'epoch=\d+-train_loss=.+\.ckpt', f)]
+    checkpoints = [f for f in os.listdir(checkpoint_dir) if re.match(r'epoch=\d+-val_loss=.+\.ckpt', f)]
     if not checkpoints:
         raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
 
     # Get the checkpoint with the largest epoch number
     ckpt_path = max(checkpoints, key=lambda f: int(re.search(r'epoch=(\d+)', f).group(1)))
+    # ckpt = CARL.load_from_checkpoint(checkpoint_path=os.path.join(checkpoint_dir, ckpt_path), instantiate=False)
+    ckpt_path = os.path.join(checkpoint_dir, ckpt_path)
+    ckpt_data = torch.load(ckpt_path, map_location="cpu")
+    hparams = ckpt_data["hyper_parameters"]
+    if '_instantiator' in hparams: hparams.pop('_instantiator')
+    # Instantiate model with saved hparams
+    model = CARL(**hparams)
+    model.load_state_dict(ckpt_data["state_dict"])
 
-    ckpt = CARL.load_from_checkpoint(checkpoint_path=os.path.join(checkpoint_dir, ckpt_path))
-
-    return scaler, ckpt
+    return scaler, model
 
 def get_likelihood_ratio(events, features, scaler_X, model):
     trainer = L.Trainer(accelerator='gpu', devices=1, enable_progress_bar=False)
