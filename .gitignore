@@ -2,6 +2,9 @@
 .DS_Store
 images/.DS_Store
 */.DS_Store
+sessions/day1/.ipynb_checkpoints/
+.ipynb_checkpoints/
+sessions/day2/ensembling-tutorial/lightning_logs/
 */.ipynb_checkpoints/
 .vscode/
 __pycache__/
