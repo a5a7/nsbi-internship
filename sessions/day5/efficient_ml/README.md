@@ -8,6 +8,7 @@ This repository contains simple notebooks to demonstrate post-training quantizat
 ## JupyterHub Instructions
 
 We will use the [NERSC jupyterhub]( https://jupyter.nersc.gov/) for this session.
+- Use the `tensorflow-2.9.0` Kernel for your notebooks
 
 -----
 
@@ -34,9 +35,9 @@ conda activate quant-demo
 The jet-tagging problem description could be found on the `hls4ml-tutorial` [slides](https://docs.google.com/presentation/d/1c4LvEc6yMByx2HJs8zUP5oxLtY6ACSizQdKvw5cg5Ck/edit#slide=id.ge9460ec16d_2_506) (page 30-32).
 
 There are two notebooks:
-- [part1_karas_training.ipynb](https://github.com/ml4fp/2024-lbnl/blob/main/efficient_ml/part1_karas_training.ipynb): This is the training notebook. It uses the open jet-tagging data and trains a Deep Neural Network (DNN) using Keras and TensorFlow.
-- [part2_post-training-quantization.ipynb](https://github.com/ml4fp/2024-lbnl/blob/main/efficient_ml/part2_post-training-quantization.ipynb): This notebook shows how to do post-training quantization using qkeras. QKeras is "Quantized Keras" for deep heterogeneous quantization of ML models.
-- [part3_pruning.ipynb] (https://github.com/ml4fp/2024-lbnl/blob/main/efficient_ml/part3_pruning.ipynb) This notebook shows how to do a apply magnitude-based pruning using Keras and TensorFlow.
+- [part1_karas_training.ipynb](https://github.com/ml4fp/2025-lbnl/blob/main/sessions/day5/efficient_ml/part1_karas_training.ipynb): This is the training notebook. It uses the open jet-tagging data and trains a Deep Neural Network (DNN) using Keras and TensorFlow.
+- [part2_post-training-quantization.ipynb](https://github.com/ml4fp/2025-lbnl/blob/main/sessions/day5/efficient_ml/part2_post-training-quantization.ipynb): This notebook shows how to do post-training quantization using qkeras. QKeras is "Quantized Keras" for deep heterogeneous quantization of ML models.
+- [part3_pruning.ipynb](https://github.com/ml4fp/2025-lbnl/blob/main/sessions/day5/efficient_ml/part3_pruning.ipynb) This notebook shows how to do a apply magnitude-based pruning using Keras and TensorFlow.
 
 
 ## hls4ml-demo
