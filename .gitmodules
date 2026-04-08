@@ -1,0 +1,6 @@
+[submodule "madminer"]
+	path = madminer
+	url = https://github.com/madminer-tool/madminer
+[submodule "evenet"]
+	path = evenet
+	url = https://github.com/UW-EPE-ML/EveNet_Public
