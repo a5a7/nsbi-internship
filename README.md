@@ -21,8 +21,8 @@ Finished a implementation of NSBI in EveNet Lite:
   Epochs: 1
   Ratio: 0.1
   Start factor: 0.1
-  Loss:
   
+  Loss:
   Focal gamma: 0.0 (standard BCE)
   
   Training:
@@ -31,8 +31,8 @@ Finished a implementation of NSBI in EveNet Lite:
   Sampler: weighted
   Monitor: val_loss
   Save top k: 1
-  Data (from logs):
 
+  Data (from logs):
   Train size: 4,610,116
   Val size: 1,152,530
   Steps per epoch: 9,005
