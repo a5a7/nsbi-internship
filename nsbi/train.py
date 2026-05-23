@@ -36,6 +36,67 @@ SEQ_DIM    = 4
 GLOBAL_DIM = 3
 
 
+def _freeze_backbone(clf: EvenetLiteClassifier) -> None:
+    """Freeze PET, GlobalEmbedding, and ObjectEncoder; leave Classification trainable.
+
+    Works for both ensemble modes (independent / shared_backbone).
+    EveNet-Lite's _collect_parameters already skips frozen params, so the
+    optimizer will only touch the Classification head after this call.
+    """
+    model = clf.model
+    if hasattr(model, "models"):
+        # independent ensemble: each member has its own backbone
+        for member in model.models:
+            backbone = getattr(member, "backbone", None)
+            if backbone is None:
+                continue
+            for module_name in ("PET", "GlobalEmbedding", "ObjectEncoder"):
+                module = getattr(backbone, module_name, None)
+                if module is not None:
+                    for p in module.parameters():
+                        p.requires_grad_(False)
+    elif hasattr(model, "backbone"):
+        # shared_backbone ensemble: one backbone shared across heads
+        backbone = model.backbone
+        for module_name in ("PET", "GlobalEmbedding", "ObjectEncoder"):
+            module = getattr(backbone, module_name, None)
+            if module is not None:
+                for p in module.parameters():
+                    p.requires_grad_(False)
+
+
+def build_classifier_ssl(device: str = "auto") -> EvenetLiteClassifier:
+    """Build a classifier for the EveNet SSL (linear-probe) variant.
+
+    Loads the SSL pretrained backbone from HuggingFace, then freezes
+    PET, GlobalEmbedding, and ObjectEncoder entirely.  Only the
+    Classification head receives gradient updates — this is linear
+    probing on top of fixed SSL representations.
+
+    Compare to:
+      build_classifier()      — fine-tunes all layers (EveNet pretrained)
+      pretrained=False model  — trains everything from scratch (EveNet Full)
+    """
+    clf = EvenetLiteClassifier(
+        class_labels=["bkg", "sig"],
+        device=device,
+        lr=[1e-3],                          # only the Classification head is trained
+        weight_decay=1e-2,
+        module_lists=[["Classification"]],  # optimizer group covers head only
+        grad_clip=1.0,
+        warmup_epochs=1,
+        warmup_ratio=0.1,
+        warmup_start_factor=0.1,
+        sequential_input_dim=SEQ_DIM,
+        global_input_dim=GLOBAL_DIM,
+        pretrained=True,                    # pull SSL weights from HuggingFace
+        loss_gamma=0.0,
+        log_level=logging.INFO,
+    )
+    _freeze_backbone(clf)
+    return clf
+
+
 def build_classifier(device: str = "auto") -> EvenetLiteClassifier:
     """Build a fresh EvenetLiteClassifier configured for 4-lepton NSBI data."""
     return EvenetLiteClassifier(
