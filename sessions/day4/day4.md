@@ -1,1 +1,0 @@
-# Day 4: Generative Models and Anomaly Detection

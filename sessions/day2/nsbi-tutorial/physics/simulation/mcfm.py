@@ -26,10 +26,6 @@ n_bsm_points = len(c6_points) * len(ct_values) * len(cg_values)
 
 csv_components = [
 	f"msq_{comp}_sm" for comp in ["sig", "int", "sbi", "bkg"]
-] + [
-	f"msq_{comp}_bsm_{i}"
-	for comp in ["sig", "int", "sbi"]
-	for i in range(1, n_bsm_points+1)
 ]
 
 csv_component_sm = {
@@ -86,7 +82,9 @@ def from_csv(file_path : str, *, cross_section : float = None, n_rows : int = No
 
 	import glob
 	file_paths = glob.glob(file_path)
-	dfs = [pd.read_csv(fp, nrows=n_rows) for fp in file_paths]
+	kin_cols = csv_kinematics + (kinematics if kinematics is not None else [])
+	usecols = list(dict.fromkeys(kin_cols + csv_components + [csv_weight]))
+	dfs = [pd.read_csv(fp, nrows=n_rows, usecols=usecols) for fp in file_paths]
 	df = pd.concat(dfs, ignore_index=True)
 
 	if kinematics is not None:

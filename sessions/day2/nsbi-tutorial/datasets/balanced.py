@@ -97,13 +97,13 @@ class BalancedDataModule(L.LightningDataModule):
             self.testing_data = BalancedDataset(events_numerator_test, events_denominator_test, self.features, scaler = self.scaler, random_state=self.random_state)
 
     def train_dataloader(self):
-        return DataLoader(self.training_data, batch_size=self.batch_size, num_workers=8)
+        return DataLoader(self.training_data, batch_size=self.batch_size, num_workers=0)
 
     def val_dataloader(self):
-        return DataLoader(self.validation_data, batch_size=self.batch_size, num_workers=8)
+        return DataLoader(self.validation_data, batch_size=self.batch_size, num_workers=0)
 
     def test_dataloader(self):
-        return DataLoader(self.testing_data, batch_size=self.batch_size, num_workers=8)
+        return DataLoader(self.testing_data, batch_size=self.batch_size, num_workers=0)
 
 class BalancedDataset(Dataset):
     def __init__(self, events_numerator = None, events_denominator = None, features = None, scaler = None, random_state = None):
@@ -115,8 +115,8 @@ class BalancedDataset(Dataset):
         self.X = np.concatenate([X_numerator, X_denominator])
 
         # balanced weights
-        w_numerator = events_numerator.weights.to_numpy()
-        w_denominator = events_denominator.weights.to_numpy()
+        w_numerator = events_numerator.weights.to_numpy().copy()
+        w_denominator = events_denominator.weights.to_numpy().copy()
         w_numerator /= w_numerator.sum()
         w_denominator /= w_denominator.sum()
         self.w = np.concatenate([w_numerator, w_denominator])
