@@ -54,12 +54,15 @@ def _load_clf(checkpoint_path: Path, device: str = "auto") -> EvenetLiteClassifi
     return clf
 
 
-def _make_obs_process(proc_sbi, mu_true: float):
+def _make_obs_process(proc_sbi, mu_true: float, lumi: float = 300.0):
     """Create a 'pseudo-observed' dataset from SBI events scaled to mu_true.
 
     In a real experiment this would be actual data. Here we simulate it by
     reweighting the SBI sample with the signal strength formula:
-        w_obs = w_sbi * (mu * msq_sig + sqrt(mu) * msq_int + msq_bkg) / msq_sbi
+        w_obs = w_sbi * (mu * msq_sig + sqrt(mu) * msq_int + msq_bkg) / msq_sbi * lumi
+
+    The lumi factor converts cross-section-unit weights (fb) to event counts,
+    so that w_obs.sum() matches nu_mu = xs * lumi used in the rate term.
     """
     import numpy as np
     import pandas as pd
@@ -75,7 +78,7 @@ def _make_obs_process(proc_sbi, mu_true: float):
     msq_sbi = c["msq_sbi_sm"].values
 
     scaling = (mu * msq_sig + np.sqrt(mu) * msq_int + msq_bkg) / msq_sbi
-    w_obs = w * scaling
+    w_obs = w * scaling * lumi
 
     return Process(
         kinematics=proc_sbi.kinematics,
@@ -198,7 +201,7 @@ def run(args: argparse.Namespace) -> None:
     # 3. Generate pseudo-observed dataset
     # -----------------------------------------------------------------
     logging.info("Generating pseudo-observed data at mu_true = %.2f ...", args.mu_true)
-    obs_process = _make_obs_process(proc_sbi, mu_true=args.mu_true)
+    obs_process = _make_obs_process(proc_sbi, mu_true=args.mu_true, lumi=args.lumi)
 
     # -----------------------------------------------------------------
     # 4. Scan mu
