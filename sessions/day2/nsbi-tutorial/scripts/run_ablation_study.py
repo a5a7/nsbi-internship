@@ -2,37 +2,35 @@
 """
 run_ablation_study.py
 ─────────────────────
-Ablation study on the EveNet ClassificationHead only.
+Ablation study on the EveNet ClassificationHead.
 
-For each config:
-  1. Build EveNetLite with modified Classification section
-  2. Load pre-trained backbone (PET + GlobalEmbedding + ObjectEncoder) — frozen
-  3. Fine-tune only the new Classification head on bkg+sbi and bkg+sig data
-  4. Score observed data, calibrate, compute NLL measurement
-  5. Append results to ~/ablation_results.json
+Imports from sibling scripts:
+  run_diagnostics.py  →  df_to_evenet, compute_m4l, plot_reweighting, plot_calib_curve
+  run_measurement.py  →  compute_t_shape, compute_t_rate, plot_nll
+
+Per ablation, saves to <nsbi-tutorial>/plots/ablation/<name>/:
+  nll.png           — NLL breakdown curve
+  calibration.png   — NSBI ŝ(x) vs MC s(x)  (S/B and SBI/B)
+  reweighting.png   — m4l histograms + ratio/truth panels (S/B and SBI/B)
 
 Run (WSL, nsbi-venv activated):
-  python3 /mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial/scripts/run_ablation_study.py
-
-  # Run a single ablation by name (skip others):
+  python3 .../run_ablation_study.py
   python3 .../run_ablation_study.py --only layers_2
-
-  # Skip to measurement (training already done):
+  python3 .../run_ablation_study.py --resume
   python3 .../run_ablation_study.py --only layers_2 --skip-training
 """
 
-import argparse
-import copy
-import gc
-import json
-import logging
-import sys
+import argparse, copy, gc, json, logging, sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 import yaml
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 HOME        = Path.home()
@@ -40,88 +38,56 @@ CHECKPOINTS = HOME / 'checkpoints'
 NSBI_DIR    = Path('/mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial')
 EVENET_REPO = Path('/mnt/c/Users/Unnat/2025-lbnl/EveNet-Lite-main')
 REPO_ROOT   = Path('/mnt/c/Users/Unnat/2025-lbnl')
+SCRIPTS_DIR = NSBI_DIR / 'scripts'
 
-OBS_CSVS = [
-    REPO_ROOT / 'observed_0.csv',
-    REPO_ROOT / 'observed_1.csv',
-    REPO_ROOT / 'observed_2.csv',
-    REPO_ROOT / 'observed_3.csv',
-    REPO_ROOT / 'observed_4.csv',
-]
-
+OBS_CSVS        = [REPO_ROOT / f'observed_{i}.csv' for i in range(5)]
 EVENET_SBI_CKPT = CHECKPOINTS / 'EveNet_sbi_over_bkg-val_loss-epoch0020-0.6926.pt'
 EVENET_SIG_CKPT = CHECKPOINTS / 'EveNet_sig_over_bkg-val_loss-epoch0007-0.4123.pt'
 XS_JSON         = REPO_ROOT / 'ggzz4l_xs.json'
 
-ABLATION_CKPT_DIR = HOME / 'ablation_checkpoints'
-RESULTS_JSON      = HOME / 'ablation_results.json'
+ABLATION_CKPT_DIR  = HOME / 'ablation_checkpoints'
+ABLATION_PLOTS_DIR = NSBI_DIR / 'plots' / 'ablation'
+RESULTS_JSON       = HOME / 'ablation_results.json'
 
-for p in (str(NSBI_DIR), str(EVENET_REPO)):
+# sys.path must be set before importing sibling scripts
+for p in (str(SCRIPTS_DIR), str(NSBI_DIR), str(EVENET_REPO)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+# ── Imports from sibling scripts ──────────────────────────────────────────────
+import run_diagnostics as diag   # df_to_evenet, compute_m4l, plot_reweighting, plot_calib_curve
+import run_measurement as meas   # compute_t_shape, compute_t_rate, plot_nll
+
 # ── Constants ──────────────────────────────────────────────────────────────────
-LEPTON_PREFIXES     = ['l1', 'l2', 'l3', 'l4']
-EVENET_FEATURE_NAMES = {
-    'x':       ['pt', 'energy', 'eta', 'phi'],
-    'globals': ['m4l', 'sum_pt', 'sum_energy'],
-}
+EVENET_FEATURE_NAMES = {'x': ['pt', 'energy', 'eta', 'phi'],
+                        'globals': ['m4l', 'sum_pt', 'sum_energy']}
 NORM_RULES = {
-    'x': {
-        'pt':     'log_normalize',
-        'energy': 'log_normalize',
-        'eta':    'normalize',
-        'phi':    'normalize_uniform',
-    },
-    'globals': {
-        'm4l':        'log_normalize',
-        'sum_pt':     'log_normalize',
-        'sum_energy': 'log_normalize',
-    },
+    'x':       {'pt': 'log_normalize', 'energy': 'log_normalize',
+                'eta': 'normalize',    'phi': 'normalize_uniform'},
+    'globals': {'m4l': 'log_normalize', 'sum_pt': 'log_normalize',
+                'sum_energy': 'log_normalize'},
 }
 
-N_CALIB    = 50_000   # bkg events for calibration C-factor
+N_CALIB    = 50_000
+N_VAL_DIAG = 20_000   # events per class for diagnostic plots
+MAX_TRAIN  = 100_000  # per class cap for training
 VAL_FRAC   = 0.2
 SEED       = 42
-MAX_EVENTS = 100_000  # per class for training (cap for memory)
 BATCH_SIZE = 512
 SBI_EPOCHS = 15
 SIG_EPOCHS = 10
 PATIENCE   = 5
-LUMI       = 300.0    # ifb
 
 # ── Ablation configs ───────────────────────────────────────────────────────────
-# Each entry: name (str) + cls (dict of Classification overrides).
-# Baseline (empty dict) retrains the same architecture as the original.
-
 ABLATIONS = [
-    # ── Baseline (no overrides) ────────────────────────────────────────────────
-    {"name": "baseline",         "cls": {}},
-
-    # ── F1: BranchLinear depth ─────────────────────────────────────────────────
-    {"name": "layers_0",         "cls": {"num_classification_layers": 0}},
-    {"name": "layers_2",         "cls": {"num_classification_layers": 2}},
-    {"name": "layers_4",         "cls": {"num_classification_layers": 4}},
-    {"name": "layers_8",         "cls": {"num_classification_layers": 8}},
-
-    # ── F2: Head hidden dim ────────────────────────────────────────────────────
-    {"name": "hidden_64",        "cls": {"hidden_dim": 64}},
-    {"name": "hidden_128",       "cls": {"hidden_dim": 128}},
-    {"name": "hidden_512",       "cls": {"hidden_dim": 512}},
-
-    # ── F3: Cross-attention heads ──────────────────────────────────────────────
-    {"name": "attn_heads_1",     "cls": {"num_attention_heads": 1}},
-    {"name": "attn_heads_2",     "cls": {"num_attention_heads": 2}},
-    {"name": "attn_heads_4",     "cls": {"num_attention_heads": 4}},
-    {"name": "attn_heads_16",    "cls": {"num_attention_heads": 16}},
-
-    # ── F5: Skip connection ────────────────────────────────────────────────────
-    {"name": "no_skip",          "cls": {"skip_connection": False}},
-
-    # ── F7: Dropout ────────────────────────────────────────────────────────────
-    {"name": "dropout_0",        "cls": {"dropout": 0.0}},
-    {"name": "dropout_02",       "cls": {"dropout": 0.2}},
-    {"name": "dropout_05",       "cls": {"dropout": 0.5}},
+    {"name": "baseline",   "cls": {}},
+    {"name": "layers_0",   "cls": {"num_classification_layers": 0}},
+    {"name": "layers_2",   "cls": {"num_classification_layers": 2}},
+    {"name": "layers_4",   "cls": {"num_classification_layers": 4}},
+    {"name": "layers_8",   "cls": {"num_classification_layers": 8}},
+    {"name": "hidden_64",  "cls": {"hidden_dim": 64}},
+    {"name": "hidden_128", "cls": {"hidden_dim": 128}},
+    {"name": "hidden_512", "cls": {"hidden_dim": 512}},
 ]
 
 
@@ -129,8 +95,7 @@ ABLATIONS = [
 # Model helpers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def build_ablation_clf(cls_overrides: dict) -> 'EvenetLiteClassifier':
-    """Build EvenetLiteClassifier with modified Classification config."""
+def build_ablation_clf(cls_overrides: dict):
     from evenet_lite import EvenetLiteClassifier
     from evenet_lite.model import EveNetLite
     from evenet.control.global_config import DotDict
@@ -138,485 +103,430 @@ def build_ablation_clf(cls_overrides: dict) -> 'EvenetLiteClassifier':
     cfg_path = EVENET_REPO / 'evenet_lite' / 'config' / 'default_network_config.yaml'
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
+    for k, v in cls_overrides.items():
+        cfg['Classification'][k] = v
 
-    for key, val in cls_overrides.items():
-        cfg['Classification'][key] = val
-
-    model = EveNetLite(
-        config=DotDict(cfg),
-        global_input_dim=3,
-        sequential_input_dim=4,
-        cls_label=['bkg', 'num'],
+    model = EveNetLite(config=DotDict(cfg), global_input_dim=3,
+                       sequential_input_dim=4, cls_label=['bkg', 'num'])
+    return EvenetLiteClassifier(
+        class_labels=['bkg', 'num'], device='auto',
+        lr=[1e-3], module_lists=[['Classification']],
+        weight_decay=1e-2, num_workers=0,
+        global_input_dim=3, sequential_input_dim=4, model=model,
     )
 
-    # Use head-only LR groups; the backbone will be frozen
-    clf = EvenetLiteClassifier(
-        class_labels=['bkg', 'num'],
-        device='auto',
-        lr=[1e-3],
-        module_lists=[['Classification']],
-        weight_decay=1e-2,
-        num_workers=0,
-        global_input_dim=3,
-        sequential_input_dim=4,
-        model=model,
-    )
-    return clf
 
-
-def load_backbone_weights(clf: 'EvenetLiteClassifier', ckpt_path: Path) -> dict:
-    """
-    Soft-load backbone weights from a pre-trained checkpoint into clf.
-    Classification head keys are silently skipped if shapes differ.
-    Returns normalizer state dict from the checkpoint.
-    """
+def load_backbone_weights(clf, ckpt_path: Path) -> dict:
     raw = torch.load(str(ckpt_path), map_location='cpu')
-    model_state = raw.get('model', raw)
-    clf._soft_load_state_dict(model_state)
+    clf._soft_load_state_dict(raw.get('model', raw))
     return raw.get('normalizer', None)
 
 
-def freeze_backbone(clf: 'EvenetLiteClassifier') -> None:
-    """Freeze everything except the Classification head."""
-    model = clf.model
-    # EveNetLite with n_ensemble=1, ensemble_mode='independent'
-    for single in model.models:
+def freeze_backbone(clf) -> None:
+    for single in clf.model.models:
         for p in single.backbone.parameters():
             p.requires_grad_(False)
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f'    Trainable params after freeze: {trainable:,}')
+    n = sum(p.numel() for p in clf.model.parameters() if p.requires_grad)
+    print(f'    Trainable (head only): {n:,} params')
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Data helpers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def df_to_evenet(df: pd.DataFrame) -> dict:
-    """Convert lepton DataFrame to EveNet tensor dict."""
-    pt  = np.stack([df[f'{l}_pt'].to_numpy()     for l in LEPTON_PREFIXES], 1).astype(np.float32)
-    en  = np.stack([df[f'{l}_energy'].to_numpy() for l in LEPTON_PREFIXES], 1).astype(np.float32)
-    eta = np.stack([df[f'{l}_eta'].to_numpy()    for l in LEPTON_PREFIXES], 1).astype(np.float32)
-    phi = np.stack([df[f'{l}_phi'].to_numpy()    for l in LEPTON_PREFIXES], 1).astype(np.float32)
-    x   = np.stack([pt, en, eta, phi], axis=2)   # (N, 4, 4)
-    px  = pt * np.cos(phi); py = pt * np.sin(phi); pz = pt * np.sinh(eta)
-    M2  = en.sum(1)**2 - px.sum(1)**2 - py.sum(1)**2 - pz.sum(1)**2
-    m4l = np.sqrt(np.maximum(M2, 0)).astype(np.float32)
-    N   = len(df)
-    return {
-        'x':       torch.from_numpy(x),
-        'x_mask':  torch.ones((N, 4), dtype=torch.float32),
-        'globals': torch.from_numpy(np.stack([m4l, pt.sum(1), en.sum(1)], axis=1)),
-    }
+def load_training_pair(csv_a: Path, csv_b: Path):
+    rng = np.random.default_rng(SEED)
 
-
-def load_training_pair(csv_a: Path, csv_b: Path,
-                       max_per_class: int = MAX_EVENTS,
-                       val_frac: float = VAL_FRAC,
-                       seed: int = SEED):
-    """
-    Build (train_data, val_data) from two CSVs.
-    csv_a = bkg (label 0), csv_b = signal-type (label 1).
-    Returns (train_data, val_data) each as (features_dict, labels, weights).
-    """
-    rng = np.random.default_rng(seed)
-
-    def load_and_cap(csv, label, max_n):
+    def cap_load(csv, label):
         df = pd.read_csv(csv)
-        if len(df) > max_n:
-            idx = rng.choice(len(df), max_n, replace=False)
-            df  = df.iloc[idx].reset_index(drop=True)
-        feats  = df_to_evenet(df)
-        labels = torch.full((len(df),), label, dtype=torch.long)
+        if len(df) > MAX_TRAIN:
+            df = df.iloc[rng.choice(len(df), MAX_TRAIN, replace=False)].reset_index(drop=True)
+        feats   = diag.df_to_evenet(df)
+        labels  = torch.full((len(df),), label, dtype=torch.long)
         weights = torch.tensor(df['wt'].to_numpy(), dtype=torch.float32)
         return feats, labels, weights
 
-    feats_a, lbl_a, wt_a = load_and_cap(csv_a, 0, max_per_class)
-    feats_b, lbl_b, wt_b = load_and_cap(csv_b, 1, max_per_class)
+    fa, la, wa = cap_load(csv_a, 0)
+    fb, lb, wb = cap_load(csv_b, 1)
+    feats = {k: torch.cat([fa[k], fb[k]]) for k in fa}
+    lbls  = torch.cat([la, lb])
+    wts   = torch.cat([wa, wb])
 
-    N_a, N_b = len(lbl_a), len(lbl_b)
-    feats = {k: torch.cat([feats_a[k], feats_b[k]], dim=0) for k in feats_a}
-    lbls  = torch.cat([lbl_a, lbl_b])
-    wts   = torch.cat([wt_a, wt_b])
-
-    N     = N_a + N_b
-    perm  = rng.permutation(N)
-    n_val = int(N * val_frac)
-    val_idx   = perm[:n_val]
-    train_idx = perm[n_val:]
-
+    perm  = rng.permutation(len(lbls))
+    n_val = int(len(lbls) * VAL_FRAC)
     def split(idx):
-        f = {k: v[idx] for k, v in feats.items()}
-        return f, lbls[idx], wts[idx]
-
-    return split(train_idx), split(val_idx)
+        return {k: v[idx] for k, v in feats.items()}, lbls[idx], wts[idx]
+    return split(perm[n_val:]), split(perm[:n_val])
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Training
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-def train_head(clf: 'EvenetLiteClassifier',
-               train_data, val_data,
-               normalizer_state: dict,
-               epochs: int,
-               ckpt_path: Path) -> float:
-    """
-    Fine-tune Classification head. Backbone must already be frozen.
-    Returns best val_loss.
-    """
-    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-
-    clf.fit(
-        train_data=train_data,
-        val_data=val_data,
-        feature_names=copy.deepcopy(EVENET_FEATURE_NAMES),
-        normalization_rules=copy.deepcopy(NORM_RULES),
-        normalization_stats=normalizer_state,
-        epochs=epochs,
-        batch_size=BATCH_SIZE,
-        checkpoint_path=str(ckpt_path),
-        save_top_k=1,
-        monitor_metric='val_loss',
-        minimize_metric=True,
-        early_stop_metric='val_loss',
-        early_stop_patience=PATIENCE,
-        early_stop_minimize=True,
-    )
-
-    # Load the saved best checkpoint to get val_loss
-    saved = list(ckpt_path.parent.glob(f'{ckpt_path.stem}*.pt'))
-    best_loss = float('nan')
-    for f in saved:
-        try:
-            raw = torch.load(str(f), map_location='cpu')
-            extra = raw.get('extra', {})
-            v = extra.get('monitored_metric', None)
-            if v is not None and (np.isnan(best_loss) or v < best_loss):
-                best_loss = float(v)
-        except Exception:
-            pass
-
-    return best_loss
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Scoring + calibration
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-def score_evenet_batch(clf: 'EvenetLiteClassifier',
-                       feats: dict, batch_size: int = 512) -> torch.Tensor:
-    """Return softmax prob of class-1, clamped."""
-    N = len(feats['x'])
-    all_logits = []
+def score_silent(clf, feats: dict) -> torch.Tensor:
+    """Score returning class-1 softmax prob; suppresses INFO logs."""
+    N, logits = len(feats['x']), []
     logging.disable(logging.INFO)
     try:
         with torch.no_grad():
-            for start in range(0, N, batch_size):
-                b = {k: v[start:start+batch_size] for k, v in feats.items()}
-                all_logits.append(clf.predict(b, batch_size=len(b['x'])))
+            for s in range(0, N, BATCH_SIZE):
+                b = {k: v[s:s+BATCH_SIZE] for k, v in feats.items()}
+                logits.append(clf.predict(b, batch_size=len(b['x'])))
     finally:
         logging.disable(logging.NOTSET)
-    return torch.softmax(torch.cat(all_logits), dim=-1)[:, 1].clamp(1e-7, 1 - 1e-7).cpu()
+    return torch.softmax(torch.cat(logits), dim=-1)[:, 1].clamp(1e-7, 1-1e-7).cpu()
 
 
 def compute_C(s: torch.Tensor, wt: torch.Tensor) -> float:
     return (wt.sum() / (wt * s / (1 - s)).sum()).item()
 
 
-def score_and_calibrate(clf_sbi: 'EvenetLiteClassifier',
-                        clf_sig: 'EvenetLiteClassifier',
-                        bkg_df: pd.DataFrame,
-                        obs_df: pd.DataFrame):
-    """
-    Calibrate on bkg_df, score obs_df.
-    Returns (r_sbi, r_sig, n_obs, C_sbi, C_sig).
-    """
-    wt_bkg = torch.tensor(bkg_df['wt'].to_numpy(), dtype=torch.float32)
-    ev_bkg = df_to_evenet(bkg_df)
-    ev_obs = df_to_evenet(obs_df)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Training
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    s_bkg_sbi = score_evenet_batch(clf_sbi, ev_bkg)
-    s_bkg_sig = score_evenet_batch(clf_sig, ev_bkg)
-    del ev_bkg; gc.collect()
-
-    C_sbi = compute_C(s_bkg_sbi, wt_bkg)
-    C_sig = compute_C(s_bkg_sig, wt_bkg)
-    print(f'    C_sbi={C_sbi:.4f}  C_sig={C_sig:.4f}')
-
-    s_obs_sbi = score_evenet_batch(clf_sbi, ev_obs)
-    s_obs_sig = score_evenet_batch(clf_sig, ev_obs)
-    del ev_obs; gc.collect()
-
-    r_sbi = s_obs_sbi / (1 - s_obs_sbi) * C_sbi
-    r_sig = s_obs_sig / (1 - s_obs_sig) * C_sig
-    n_obs = torch.tensor(obs_df['n'].to_numpy(), dtype=torch.float32)
-
-    return r_sbi, r_sig, n_obs, C_sbi, C_sig
+def train_head(clf, train_data, val_data, normalizer_state,
+               epochs: int, ckpt_dir: Path) -> float:
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    clf.fit(
+        train_data=train_data, val_data=val_data,
+        feature_names=copy.deepcopy(EVENET_FEATURE_NAMES),
+        normalization_rules=copy.deepcopy(NORM_RULES),
+        normalization_stats=normalizer_state,
+        epochs=epochs, batch_size=BATCH_SIZE,
+        checkpoint_path=str(ckpt_dir / 'best'),
+        save_top_k=1, monitor_metric='val_loss', minimize_metric=True,
+        early_stop_metric='val_loss', early_stop_patience=PATIENCE,
+        early_stop_minimize=True,
+    )
+    best_loss = float('nan')
+    for f in sorted(ckpt_dir.glob('best*.pt')):
+        try:
+            v = (torch.load(str(f), map_location='cpu').get('extra') or {}).get('monitored_metric')
+            if v is not None and (np.isnan(best_loss) or v < best_loss):
+                best_loss = float(v)
+        except Exception:
+            pass
+    return best_loss
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# NLL measurement (inline — no subprocess)
+# Plot: reweighting with ratio panels (new — wraps diag.plot_reweighting data)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def compute_t_shape(r_sig, r_sbi, n_obs, mu_space,
-                    xs_sig, xs_sbi, xs_bkg, xs_int, chunk=20_000):
-    sqrt_mu  = torch.sqrt(mu_space)
-    mult_sig = mu_space - sqrt_mu
-    mult_sbi = sqrt_mu
-    mult_bkg = 1.0 - sqrt_mu
-    denom    = xs_sig * mu_space + xs_int * sqrt_mu + xs_bkg
+def _rw_panel(ax_top, ax_bot, m4l_bkg, wt_bkg, r_bkg, m4l_num, wt_num, title):
+    bins = diag.M4L_BINS
+    bw   = np.diff(bins)
 
-    t = torch.zeros(len(mu_space))
-    N = len(n_obs)
-    for start in range(0, N, chunk):
-        rs = r_sig[start:start+chunk]
-        rb = r_sbi[start:start+chunk]
-        ni = n_obs[start:start+chunk]
-        numer = (xs_sig * mult_sig[None, :] * rs[:, None]
-               + xs_sbi * mult_sbi[None, :] * rb[:, None]
-               + xs_bkg * mult_bkg[None, :])
-        r_mu = (numer / denom[None, :]).clamp(min=1e-9)
-        t   += -2.0 * (ni[:, None] * torch.log(r_mu)).sum(0)
-    return t
+    def dens(vals, wts):
+        h, _ = np.histogram(vals, bins=bins, weights=wts)
+        return h / (h.sum() * bw) if h.sum() > 0 else h.astype(float)
+
+    d_d = dens(m4l_bkg, wt_bkg)
+    n_d = dens(m4l_num, wt_num)
+    r_d = dens(m4l_bkg, wt_bkg * r_bkg.numpy())
+
+    kw = dict(where='post')
+    ax_top.step(bins[:-1], d_d, label='Denominator ($D$)',      color='steelblue', **kw)
+    ax_top.step(bins[:-1], n_d, label='Numerator ($N$) truth',  color='tab:orange',**kw)
+    ax_top.step(bins[:-1], r_d, label='$r(x)\\times B$',        color='green', ls='--', **kw)
+    ax_top.set_ylabel('Probability / bin')
+    ax_top.legend(fontsize=7)
+    ax_top.set_title(title)
+    plt.setp(ax_top.get_xticklabels(), visible=False)
+
+    ratio = np.where(n_d > 0, r_d / n_d, np.nan)
+    ax_bot.step(bins[:-1], ratio, where='post', color='green')
+    ax_bot.axhline(1.0, color='gray', ls='--', lw=0.8)
+    ax_bot.set_ylim(0.5, 1.5)
+    ax_bot.set_xlabel('$m_{4\\ell}$ [GeV]')
+    ax_bot.set_ylabel('Ratio / truth')
 
 
-def compute_t_rate(n_obs_total, n_files, mu_space, xs_sig, xs_bkg, xs_int):
-    nu_mu = (xs_sig * mu_space + xs_int * torch.sqrt(mu_space) + xs_bkg) * LUMI
-    return n_files * nu_mu - n_obs_total * torch.log(nu_mu)
+def save_reweighting(m4l_bkg, wt_bkg,
+                     r_sig_bkg, m4l_sig, wt_sig,
+                     r_sbi_bkg, m4l_sbi, wt_sbi,
+                     out: Path) -> None:
+    fig = plt.figure(figsize=(13, 7))
+    gs  = GridSpec(2, 2, figure=fig, height_ratios=[3, 1], hspace=0.05, wspace=0.3)
+    _rw_panel(fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[1, 0]),
+              m4l_bkg, wt_bkg, r_sig_bkg, m4l_sig, wt_sig, 'Reweighting diagnostic: S/B')
+    _rw_panel(fig.add_subplot(gs[0, 1]), fig.add_subplot(gs[1, 1]),
+              m4l_bkg, wt_bkg, r_sbi_bkg, m4l_sbi, wt_sbi, 'Reweighting diagnostic: SBI/B')
+    plt.savefig(out, dpi=150, bbox_inches='tight'); plt.close()
 
 
-def run_measurement(r_sbi, r_sig, n_obs, n_files, xs) -> dict:
-    """Compute mu_hat, 1sigma interval. Returns result dict."""
-    xs_sig = float(np.prod(xs['sig']))
-    xs_bkg = float(np.prod(xs['bkg']))
-    xs_int = float(np.prod(xs['int']))
-    xs_sbi = float(np.prod(xs['sbi']))
+def save_calibration(s_bkg_sig, s_sig, wt_bkg, wt_sig,
+                     s_bkg_sbi, s_sbi, wt_sbi, out: Path) -> None:
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 5))
+    diag.plot_calib_curve(ax1, s_bkg_sig, s_sig,
+                          torch.tensor(wt_bkg), torch.tensor(wt_sig), 'S/B')
+    diag.plot_calib_curve(ax2, s_bkg_sbi, s_sbi,
+                          torch.tensor(wt_bkg), torch.tensor(wt_sbi), 'SBI/B')
+    plt.suptitle('Calibration: NSBI $\\hat{s}(x)$ vs MC $s(x)$', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(out, dpi=150, bbox_inches='tight'); plt.close()
 
-    mu_space = torch.linspace(0.0, 4.0, 801)   # finer grid
-    N_obs_total = n_obs.sum()
 
-    t_rate  = compute_t_rate(N_obs_total, n_files, mu_space, xs_sig, xs_bkg, xs_int)
-    t_shape = compute_t_shape(r_sig, r_sbi, n_obs, mu_space,
-                              xs_sig, xs_sbi, xs_bkg, xs_int)
-    t_total = t_rate + t_shape
-    t_norm  = t_total - t_total.min()
+def save_nll(r_sbi, r_sig, n_obs, n_files, xs, out: Path) -> dict:
+    xs_sig = float(np.prod(xs['sig'])); xs_bkg = float(np.prod(xs['bkg']))
+    xs_int = float(np.prod(xs['int'])); xs_sbi = float(np.prod(xs['sbi']))
 
-    mu_hat    = mu_space[t_total.argmin()].item()
-    mu_arr    = mu_space.numpy()
-    t_arr     = t_norm.numpy()
-    in_1sig   = mu_arr[t_arr < 1.0]
-    in_2sig   = mu_arr[t_arr < 4.0]
+    mu_space    = torch.linspace(0.0, 4.0, 801)
+    t_rate      = meas.compute_t_rate(n_obs.sum(), n_files, mu_space, xs_sig, xs_bkg, xs_int)
+    t_shape     = meas.compute_t_shape(r_sig, r_sbi, n_obs, mu_space,
+                                       xs_sig, xs_sbi, xs_bkg, xs_int)
+    t_total     = t_rate + t_shape
 
-    sig_lo = float(in_1sig[0])  if len(in_1sig) > 0 else float('nan')
-    sig_hi = float(in_1sig[-1]) if len(in_1sig) > 0 else float('nan')
-    sig2_lo = float(in_2sig[0])  if len(in_2sig) > 0 else float('nan')
-    sig2_hi = float(in_2sig[-1]) if len(in_2sig) > 0 else float('nan')
+    fig, ax = plt.subplots(figsize=(7, 5))
+    meas.plot_nll(ax, mu_space, t_rate, t_shape, t_total, 'EveNet (ablated head)')
+    plt.tight_layout()
+    plt.savefig(out, dpi=150, bbox_inches='tight'); plt.close()
+
+    t_norm = (t_total - t_total.min()).numpy()
+    mu_arr = mu_space.numpy()
+    mu_hat = float(mu_arr[t_total.argmin()])
+    in_1s  = mu_arr[t_norm < 1.0]
+    in_2s  = mu_arr[t_norm < 4.0]
 
     return {
-        'mu_hat':    round(mu_hat, 4),
-        '1sig_lo':   round(sig_lo, 4),
-        '1sig_hi':   round(sig_hi, 4),
-        '1sig_width': round(sig_hi - sig_lo, 4) if not np.isnan(sig_lo) else float('nan'),
-        '2sig_lo':   round(sig2_lo, 4),
-        '2sig_hi':   round(sig2_hi, 4),
+        'mu_hat':     round(mu_hat, 4),
+        '1sig_lo':    round(float(in_1s[0]),  4) if len(in_1s) else float('nan'),
+        '1sig_hi':    round(float(in_1s[-1]), 4) if len(in_1s) else float('nan'),
+        '1sig_width': round(float(in_1s[-1]-in_1s[0]), 4) if len(in_1s) else float('nan'),
+        '2sig_lo':    round(float(in_2s[0]),  4) if len(in_2s) else float('nan'),
+        '2sig_hi':    round(float(in_2s[-1]), 4) if len(in_2s) else float('nan'),
     }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Results I/O
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-def load_results() -> dict:
-    if RESULTS_JSON.exists():
-        with open(RESULTS_JSON) as f:
-            return json.load(f)
-    return {}
-
-
-def save_results(results: dict) -> None:
-    with open(RESULTS_JSON, 'w') as f:
-        json.dump(results, f, indent=2)
-    print(f'  Results saved → {RESULTS_JSON}')
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Main loop
+# Per-ablation runner
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def run_ablation(name: str, cls_overrides: dict,
-                 bkg_df: pd.DataFrame, obs_df: pd.DataFrame,
-                 xs: dict, n_files: int,
+                 bkg_calib_df, bkg_val_df, sbi_val_df, sig_val_df,
+                 obs_df, xs: dict, n_files: int,
                  skip_training: bool = False) -> dict:
-    print(f'\n{"="*60}')
-    print(f'  Ablation: {name}')
-    print(f'  Overrides: {cls_overrides or "(none — baseline)"}')
-    print(f'{"="*60}')
 
+    print(f'\n{"="*62}')
+    print(f'  Ablation: {name}  |  overrides: {cls_overrides or "(none)"}')
+    print(f'{"="*62}')
+
+    plots_dir    = ABLATION_PLOTS_DIR / name
+    plots_dir.mkdir(parents=True, exist_ok=True)
     sbi_ckpt_dir = ABLATION_CKPT_DIR / name / 'sbi'
     sig_ckpt_dir = ABLATION_CKPT_DIR / name / 'sig'
 
+    val_loss_sbi = val_loss_sig = float('nan')
+
     # ── Training ──────────────────────────────────────────────────────────────
-    val_loss_sbi = float('nan')
-    val_loss_sig = float('nan')
-
     if not skip_training:
-        # Load training data
         print('  Loading training data ...')
-        train_sbi, val_sbi = load_training_pair(
-            HOME / 'ggzz4l_bkg_slim.csv',
-            HOME / 'ggzz4l_sbi_slim.csv',
-        )
-        train_sig, val_sig = load_training_pair(
-            HOME / 'ggzz4l_bkg_slim.csv',
-            HOME / 'ggzz4l_sig_slim.csv',
-        )
-        print(f'    SBI: {len(train_sbi[1]):,} train / {len(val_sbi[1]):,} val')
-        print(f'    SIG: {len(train_sig[1]):,} train / {len(val_sig[1]):,} val')
+        train_sbi, _ = load_training_pair(HOME / 'ggzz4l_bkg_slim.csv',
+                                          HOME / 'ggzz4l_sbi_slim.csv')
+        train_sig, _ = load_training_pair(HOME / 'ggzz4l_bkg_slim.csv',
+                                          HOME / 'ggzz4l_sig_slim.csv')
 
-        # ── SBI model ─────────────────────────────────────────────────────────
+        # val data for training comes from the diagnostic val sets
+        ev_bkg_v = diag.df_to_evenet(bkg_val_df)
+        ev_sbi_v = diag.df_to_evenet(sbi_val_df)
+        ev_sig_v = diag.df_to_evenet(sig_val_df)
+        wt_bkg_v = torch.tensor(bkg_val_df['wt'].to_numpy(), dtype=torch.float32)
+        wt_sbi_v = torch.tensor(sbi_val_df['wt'].to_numpy(), dtype=torch.float32)
+        wt_sig_v = torch.tensor(sig_val_df['wt'].to_numpy(), dtype=torch.float32)
+
+        val_sbi_data = ({k: torch.cat([ev_bkg_v[k], ev_sbi_v[k]]) for k in ev_bkg_v},
+                        torch.cat([torch.zeros(len(bkg_val_df), dtype=torch.long),
+                                   torch.ones (len(sbi_val_df), dtype=torch.long)]),
+                        torch.cat([wt_bkg_v, wt_sbi_v]))
+        val_sig_data = ({k: torch.cat([ev_bkg_v[k], ev_sig_v[k]]) for k in ev_bkg_v},
+                        torch.cat([torch.zeros(len(bkg_val_df), dtype=torch.long),
+                                   torch.ones (len(sig_val_df), dtype=torch.long)]),
+                        torch.cat([wt_bkg_v, wt_sig_v]))
+
         print(f'\n  Training SBI head ({SBI_EPOCHS} max epochs, patience={PATIENCE}) ...')
-        clf_sbi = build_ablation_clf(cls_overrides)
+        clf_sbi  = build_ablation_clf(cls_overrides)
         norm_sbi = load_backbone_weights(clf_sbi, EVENET_SBI_CKPT)
         freeze_backbone(clf_sbi)
-        val_loss_sbi = train_head(clf_sbi, train_sbi, val_sbi, norm_sbi,
-                                  SBI_EPOCHS, sbi_ckpt_dir / 'best')
-        print(f'    Best val_loss_sbi = {val_loss_sbi:.5f}')
-        del train_sbi, val_sbi; gc.collect()
+        val_loss_sbi = train_head(clf_sbi, train_sbi, val_sbi_data,
+                                  norm_sbi, SBI_EPOCHS, sbi_ckpt_dir)
+        print(f'    best val_loss_sbi = {val_loss_sbi:.5f}')
+        del train_sbi; gc.collect()
 
-        # ── SIG model ─────────────────────────────────────────────────────────
         print(f'\n  Training SIG head ({SIG_EPOCHS} max epochs, patience={PATIENCE}) ...')
-        clf_sig = build_ablation_clf(cls_overrides)
+        clf_sig  = build_ablation_clf(cls_overrides)
         norm_sig = load_backbone_weights(clf_sig, EVENET_SIG_CKPT)
         freeze_backbone(clf_sig)
-        val_loss_sig = train_head(clf_sig, train_sig, val_sig, norm_sig,
-                                  SIG_EPOCHS, sig_ckpt_dir / 'best')
-        print(f'    Best val_loss_sig = {val_loss_sig:.5f}')
-        del train_sig, val_sig; gc.collect()
+        val_loss_sig = train_head(clf_sig, train_sig, val_sig_data,
+                                  norm_sig, SIG_EPOCHS, sig_ckpt_dir)
+        print(f'    best val_loss_sig = {val_loss_sig:.5f}')
+        del train_sig, ev_bkg_v, ev_sbi_v, ev_sig_v; gc.collect()
 
     else:
-        # Load from saved checkpoints
-        print('  Loading saved checkpoints (skipping training) ...')
-        sbi_files = sorted(sbi_ckpt_dir.glob('best*.pt'))
-        sig_files = sorted(sig_ckpt_dir.glob('best*.pt'))
-        if not sbi_files or not sig_files:
+        print('  Loading saved checkpoints ...')
+        sbi_f = sorted(sbi_ckpt_dir.glob('best*.pt'))
+        sig_f = sorted(sig_ckpt_dir.glob('best*.pt'))
+        if not sbi_f or not sig_f:
             raise FileNotFoundError(
-                f'No checkpoints found in {sbi_ckpt_dir} or {sig_ckpt_dir}. '
-                'Run without --skip-training first.'
-            )
-
-        from evenet_lite import EvenetLiteClassifier
+                f'No checkpoints in {sbi_ckpt_dir} / {sig_ckpt_dir}. '
+                'Run without --skip-training first.')
         clf_sbi = build_ablation_clf(cls_overrides)
         clf_sig = build_ablation_clf(cls_overrides)
-        clf_sbi.load_checkpoint(str(sbi_files[-1]),
+        clf_sbi.load_checkpoint(str(sbi_f[-1]),
                                 feature_names=copy.deepcopy(EVENET_FEATURE_NAMES))
-        clf_sig.load_checkpoint(str(sig_files[-1]),
+        clf_sig.load_checkpoint(str(sig_f[-1]),
                                 feature_names=copy.deepcopy(EVENET_FEATURE_NAMES))
 
-    # ── Scoring + measurement ─────────────────────────────────────────────────
-    print('\n  Scoring observed data ...')
-    r_sbi, r_sig, n_obs, C_sbi, C_sig = score_and_calibrate(
-        clf_sbi, clf_sig, bkg_df, obs_df
-    )
-    del clf_sbi, clf_sig; gc.collect()
+    # ── Score val sets for diagnostics ────────────────────────────────────────
+    print('  Scoring validation sets ...')
+    ev_bkg = diag.df_to_evenet(bkg_val_df)
+    ev_sbi = diag.df_to_evenet(sbi_val_df)
+    ev_sig = diag.df_to_evenet(sig_val_df)
 
-    print('  Computing NLL measurement ...')
-    result = run_measurement(r_sbi, r_sig, n_obs, n_files, xs)
-    result['val_loss_sbi'] = round(val_loss_sbi, 6)
-    result['val_loss_sig'] = round(val_loss_sig, 6)
-    result['C_sbi']        = round(C_sbi, 6)
-    result['C_sig']        = round(C_sig, 6)
-    result['cls_overrides'] = cls_overrides
+    s_bkg_sbi = score_silent(clf_sbi, ev_bkg)
+    s_sbi_sbi = score_silent(clf_sbi, ev_sbi)
+    s_bkg_sig = score_silent(clf_sig, ev_bkg)
+    s_sig_sig = score_silent(clf_sig, ev_sig)
 
-    print(f'  → μ̂={result["mu_hat"]:.3f}  '
+    # Calibrate on bkg_calib
+    wt_calib = torch.tensor(bkg_calib_df['wt'].to_numpy(), dtype=torch.float32)
+    ev_calib  = diag.df_to_evenet(bkg_calib_df)
+    C_sbi = compute_C(score_silent(clf_sbi, ev_calib), wt_calib)
+    C_sig = compute_C(score_silent(clf_sig, ev_calib), wt_calib)
+    del ev_calib; gc.collect()
+    print(f'    C_sbi={C_sbi:.4f}  C_sig={C_sig:.4f}')
+
+    # ── Reweighting diagnostic ────────────────────────────────────────────────
+    m4l_bkg = diag.compute_m4l(bkg_val_df)
+    m4l_sbi = diag.compute_m4l(sbi_val_df)
+    m4l_sig = diag.compute_m4l(sig_val_df)
+    wt_bkg  = bkg_val_df['wt'].to_numpy()
+    wt_sbi  = sbi_val_df['wt'].to_numpy()
+    wt_sig  = sig_val_df['wt'].to_numpy()
+
+    r_bkg_sbi = s_bkg_sbi / (1 - s_bkg_sbi) * C_sbi
+    r_bkg_sig = s_bkg_sig / (1 - s_bkg_sig) * C_sig
+
+    save_reweighting(m4l_bkg, wt_bkg,
+                     r_bkg_sig, m4l_sig, wt_sig,
+                     r_bkg_sbi, m4l_sbi, wt_sbi,
+                     out=plots_dir / 'reweighting.png')
+    print(f'  → reweighting.png')
+
+    # ── Calibration curves ────────────────────────────────────────────────────
+    save_calibration(s_bkg_sig, s_sig_sig, wt_bkg, wt_sig,
+                     s_bkg_sbi, s_sbi_sbi, wt_sbi,
+                     out=plots_dir / 'calibration.png')
+    print(f'  → calibration.png')
+    del ev_bkg, ev_sbi, ev_sig; gc.collect()
+
+    # ── Score observed + NLL ──────────────────────────────────────────────────
+    print('  Scoring observed data ...')
+    ev_obs    = diag.df_to_evenet(obs_df)
+    s_obs_sbi = score_silent(clf_sbi, ev_obs)
+    s_obs_sig = score_silent(clf_sig, ev_obs)
+    r_obs_sbi = s_obs_sbi / (1 - s_obs_sbi) * C_sbi
+    r_obs_sig = s_obs_sig / (1 - s_obs_sig) * C_sig
+    n_obs     = torch.tensor(obs_df['n'].to_numpy(), dtype=torch.float32)
+    del ev_obs, clf_sbi, clf_sig; gc.collect()
+
+    result = save_nll(r_obs_sbi, r_obs_sig, n_obs, n_files, xs,
+                      out=plots_dir / 'nll.png')
+    print(f'  → nll.png')
+    print(f'  μ̂={result["mu_hat"]:.3f}  '
           f'1σ=[{result["1sig_lo"]:.3f}, {result["1sig_hi"]:.3f}]  '
           f'width={result["1sig_width"]:.3f}')
 
+    result.update({'val_loss_sbi': round(val_loss_sbi, 6),
+                   'val_loss_sig': round(val_loss_sig, 6),
+                   'C_sbi': round(C_sbi, 6), 'C_sig': round(C_sig, 6),
+                   'cls_overrides': cls_overrides})
     return result
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Main
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--only',           type=str, default=None,
-                        help='Run only this ablation name')
-    parser.add_argument('--skip-training',  action='store_true',
-                        help='Skip training; load existing checkpoints')
-    parser.add_argument('--resume',         action='store_true',
-                        help='Skip ablations already in results JSON')
+    parser.add_argument('--only',          type=str,  default=None)
+    parser.add_argument('--skip-training', action='store_true')
+    parser.add_argument('--resume',        action='store_true',
+                        help='Skip ablations already saved in results JSON')
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING,
                         format='%(asctime)s | %(levelname)s | %(message)s')
 
-    # ── Shared data ────────────────────────────────────────────────────────────
     print('Loading shared data ...')
-    bkg_all   = pd.read_csv(HOME / 'ggzz4l_bkg_slim.csv', nrows=N_CALIB)
-    rng       = np.random.default_rng(SEED)
-    idx       = rng.permutation(len(bkg_all))
-    n_val     = int(len(bkg_all) * VAL_FRAC)
-    bkg_calib = bkg_all.iloc[idx[n_val:]].reset_index(drop=True)   # same split as score_observed
-    print(f'  Calibration bkg: {len(bkg_calib):,} events')
+    rng = np.random.default_rng(SEED)
 
-    obs_frames = []
-    for p in OBS_CSVS:
-        obs_frames.append(pd.read_csv(p))
-    obs_df  = pd.concat(obs_frames, ignore_index=True)
+    # bkg_calib: 80% of first N_CALIB rows (matches score_observed.py split)
+    bkg_all   = pd.read_csv(HOME / 'ggzz4l_bkg_slim.csv', nrows=N_CALIB)
+    idx       = rng.permutation(len(bkg_all))
+    bkg_calib = bkg_all.iloc[idx[int(len(bkg_all)*VAL_FRAC):]].reset_index(drop=True)
+
+    # val sets for diagnostics (capped at N_VAL_DIAG)
+    def load_val(name):
+        df = pd.read_csv(HOME / f'ggzz4l_{name}_slim.csv', nrows=N_VAL_DIAG)
+        return df.reset_index(drop=True)
+
+    bkg_val_df = load_val('bkg')
+    sbi_val_df = load_val('sbi')
+    sig_val_df = load_val('sig')
+    print(f'  calib {len(bkg_calib):,} | bkg_val {len(bkg_val_df):,} | '
+          f'sbi_val {len(sbi_val_df):,} | sig_val {len(sig_val_df):,}')
+
+    obs_df  = pd.concat([pd.read_csv(p) for p in OBS_CSVS], ignore_index=True)
     n_files = len(OBS_CSVS)
-    print(f'  Observed: {len(obs_df):,} events from {n_files} files')
+    print(f'  observed {len(obs_df):,} events from {n_files} files')
 
     with open(XS_JSON) as f:
         xs = json.load(f)
 
-    # ── Ablation loop ──────────────────────────────────────────────────────────
-    results = load_results()
-    ablations = ABLATIONS if args.only is None else [
-        a for a in ABLATIONS if a['name'] == args.only
-    ]
-    if args.only and not ablations:
-        print(f'No ablation named "{args.only}". Available: '
-              + ', '.join(a['name'] for a in ABLATIONS))
+    ABLATION_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    results = json.loads(RESULTS_JSON.read_text()) if RESULTS_JSON.exists() else {}
+    to_run  = ABLATIONS if not args.only else [
+        a for a in ABLATIONS if a['name'] == args.only]
+    if args.only and not to_run:
+        print(f'Unknown: "{args.only}". Options: {[a["name"] for a in ABLATIONS]}')
         return
 
-    for abl in ablations:
+    for abl in to_run:
         name = abl['name']
         if args.resume and name in results:
-            print(f'  Skipping {name} (already in results)')
+            print(f'  Skipping {name} (already done)')
             continue
-
         try:
             result = run_ablation(
-                name=name,
-                cls_overrides=dict(abl['cls']),
-                bkg_df=bkg_calib,
-                obs_df=obs_df,
-                xs=xs,
-                n_files=n_files,
+                name=name, cls_overrides=dict(abl['cls']),
+                bkg_calib_df=bkg_calib,
+                bkg_val_df=bkg_val_df, sbi_val_df=sbi_val_df, sig_val_df=sig_val_df,
+                obs_df=obs_df, xs=xs, n_files=n_files,
                 skip_training=args.skip_training,
             )
             results[name] = result
-            save_results(results)   # save after each ablation (fault-tolerant)
         except Exception as e:
-            print(f'  ERROR in {name}: {e}')
             import traceback; traceback.print_exc()
             results[name] = {'error': str(e)}
-            save_results(results)
+        RESULTS_JSON.write_text(json.dumps(results, indent=2))
+        print(f'  Results → {RESULTS_JSON}')
 
-    # ── Summary table ──────────────────────────────────────────────────────────
-    print('\n\n' + '='*70)
-    print(f'{"Ablation":<22} {"μ̂":>6} {"1σ lo":>7} {"1σ hi":>7} {"width":>6} {"vloss_sbi":>10} {"vloss_sig":>10}')
+    # Summary table
+    print('\n' + '='*70)
+    print(f'{"Ablation":<22} {"μ̂":>6} {"1σ lo":>7} {"1σ hi":>7}'
+          f' {"width":>6} {"vl_sbi":>8} {"vl_sig":>8}')
     print('-'*70)
     for name, r in results.items():
         if 'error' in r:
             print(f'{name:<22}  ERROR: {r["error"][:40]}')
-            continue
-        print(f'{name:<22} '
-              f'{r.get("mu_hat", float("nan")):6.3f} '
-              f'{r.get("1sig_lo", float("nan")):7.3f} '
-              f'{r.get("1sig_hi", float("nan")):7.3f} '
-              f'{r.get("1sig_width", float("nan")):6.3f} '
-              f'{r.get("val_loss_sbi", float("nan")):10.5f} '
-              f'{r.get("val_loss_sig", float("nan")):10.5f}')
+        else:
+            print(f'{name:<22} {r.get("mu_hat",float("nan")):6.3f}'
+                  f' {r.get("1sig_lo",float("nan")):7.3f}'
+                  f' {r.get("1sig_hi",float("nan")):7.3f}'
+                  f' {r.get("1sig_width",float("nan")):6.3f}'
+                  f' {r.get("val_loss_sbi",float("nan")):8.5f}'
+                  f' {r.get("val_loss_sig",float("nan")):8.5f}')
     print('='*70)
-    print(f'\nFull results: {RESULTS_JSON}')
+    print(f'Plots  → {ABLATION_PLOTS_DIR}')
+    print(f'Results → {RESULTS_JSON}')
 
 
 if __name__ == '__main__':
