@@ -35,9 +35,9 @@ from matplotlib.gridspec import GridSpec
 # ── Paths ──────────────────────────────────────────────────────────────────────
 HOME        = Path.home()
 CHECKPOINTS = HOME / 'checkpoints'
-NSBI_DIR    = Path('/mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial')
-EVENET_REPO = Path('/mnt/c/Users/Unnat/2025-lbnl/EveNet-Lite-main')
-REPO_ROOT   = Path('/mnt/c/Users/Unnat/2025-lbnl')
+NSBI_DIR    = Path('/mnt/c/Users/Unnat/nsbi-internship/sessions/day2/nsbi-tutorial')
+EVENET_REPO = Path('/mnt/c/Users/Unnat/nsbi-internship/EveNet-Lite-main')
+REPO_ROOT   = Path('/mnt/c/Users/Unnat/nsbi-internship')
 SCRIPTS_DIR = NSBI_DIR / 'scripts'
 
 OBS_CSVS        = [REPO_ROOT / f'observed_{i}.csv' for i in range(5)]
@@ -74,9 +74,8 @@ MAX_TRAIN  = 100_000  # per class cap for training
 VAL_FRAC   = 0.2
 SEED       = 42
 BATCH_SIZE = 512
-SBI_EPOCHS = 15
+SBI_EPOCHS = 20
 SIG_EPOCHS = 10
-PATIENCE   = 5
 
 # ── Ablation configs ───────────────────────────────────────────────────────────
 ABLATIONS = [
@@ -118,8 +117,16 @@ def build_ablation_clf(cls_overrides: dict):
 
 def load_backbone_weights(clf, ckpt_path: Path) -> dict:
     raw = torch.load(str(ckpt_path), map_location='cpu')
-    clf._soft_load_state_dict(raw.get('model', raw))
-    return raw.get('normalizer', None)
+    backbone_only = {k: v for k, v in raw.get('model', raw).items()
+                     if 'Classification' not in k}
+    clf._soft_load_state_dict(backbone_only)
+    # normalizer state_dict has {'stats': {...}, 'rules': {...}, ...}
+    # but apply_user_stats expects {'x': {'mean': ..., 'std': ...}, ...}
+    # so we extract just the 'stats' sub-dict
+    normalizer = raw.get('normalizer', None)
+    if normalizer is not None:
+        return normalizer.get('stats', None)
+    return None
 
 
 def freeze_backbone(clf) -> None:
@@ -143,7 +150,8 @@ def load_training_pair(csv_a: Path, csv_b: Path):
             df = df.iloc[rng.choice(len(df), MAX_TRAIN, replace=False)].reset_index(drop=True)
         feats   = diag.df_to_evenet(df)
         labels  = torch.full((len(df),), label, dtype=torch.long)
-        weights = torch.tensor(df['wt'].to_numpy(), dtype=torch.float32)
+        wt = df['wt'].to_numpy().astype(np.float32)
+        weights = torch.tensor(wt / wt.mean(), dtype=torch.float32)
         return feats, labels, weights
 
     fa, la, wa = cap_load(csv_a, 0)
@@ -192,11 +200,9 @@ def train_head(clf, train_data, val_data, normalizer_state,
         epochs=epochs, batch_size=BATCH_SIZE,
         checkpoint_path=str(ckpt_dir / 'best'),
         save_top_k=1, monitor_metric='val_loss', minimize_metric=True,
-        early_stop_metric='val_loss', early_stop_patience=PATIENCE,
-        early_stop_minimize=True,
     )
     best_loss = float('nan')
-    for f in sorted(ckpt_dir.glob('best*.pt')):
+    for f in sorted(ckpt_dir.glob('best/best*.pt')):
         try:
             v = (torch.load(str(f), map_location='cpu').get('extra') or {}).get('monitored_metric')
             if v is not None and (np.isnan(best_loss) or v < best_loss):
@@ -340,7 +346,7 @@ def run_ablation(name: str, cls_overrides: dict,
                                    torch.ones (len(sig_val_df), dtype=torch.long)]),
                         torch.cat([wt_bkg_v, wt_sig_v]))
 
-        print(f'\n  Training SBI head ({SBI_EPOCHS} max epochs, patience={PATIENCE}) ...')
+        print(f'\n  Training SBI head ({SBI_EPOCHS} max epochs) ...')
         clf_sbi  = build_ablation_clf(cls_overrides)
         norm_sbi = load_backbone_weights(clf_sbi, EVENET_SBI_CKPT)
         freeze_backbone(clf_sbi)
@@ -349,7 +355,7 @@ def run_ablation(name: str, cls_overrides: dict,
         print(f'    best val_loss_sbi = {val_loss_sbi:.5f}')
         del train_sbi; gc.collect()
 
-        print(f'\n  Training SIG head ({SIG_EPOCHS} max epochs, patience={PATIENCE}) ...')
+        print(f'\n  Training SIG head ({SIG_EPOCHS} max epochs) ...')
         clf_sig  = build_ablation_clf(cls_overrides)
         norm_sig = load_backbone_weights(clf_sig, EVENET_SIG_CKPT)
         freeze_backbone(clf_sig)

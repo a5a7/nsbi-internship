@@ -4,7 +4,7 @@ load_checkpoints.py
 ───────────────────
 Verify that both CARL and EveNet-Lite checkpoints load correctly.
 Run from WSL with nsbi-venv activated:
-    python3 /mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial/scripts/load_checkpoints.py
+    python3 /mnt/c/Users/Unnat/nsbi-internship/sessions/day2/nsbi-tutorial/scripts/load_checkpoints.py
 """
 
 import sys
@@ -12,8 +12,8 @@ from pathlib import Path
 
 HOME        = Path.home()
 CHECKPOINTS = HOME / 'checkpoints'
-NSBI_DIR    = Path('/mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial')
-EVENET_REPO = Path('/mnt/c/Users/Unnat/2025-lbnl/EveNet-Lite-main')
+NSBI_DIR    = Path('/mnt/c/Users/Unnat/nsbi-internship/sessions/day2/nsbi-tutorial')
+EVENET_REPO = Path('/mnt/c/Users/Unnat/nsbi-internship/EveNet-Lite-main')
 
 for p in (str(NSBI_DIR), str(EVENET_REPO)):
     if p not in sys.path:
@@ -49,7 +49,7 @@ def load_carl(path):
 def load_evenet(path):
     clf = EvenetLiteClassifier(
         class_labels=['bkg', 'num'],
-        device='cpu',
+        device='auto',
         num_workers=0,
         global_input_dim=3,
         sequential_input_dim=4,

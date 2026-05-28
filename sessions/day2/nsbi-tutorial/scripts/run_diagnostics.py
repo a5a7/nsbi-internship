@@ -7,7 +7,7 @@ Side-by-side diagnostic plots for CARL and EveNet-Lite:
   2. Calibration curve: NSBI ŝ(x) vs MC s(x)      [2×2 grid]
 
 Run (WSL, nsbi-venv activated):
-  python3 /mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial/scripts/run_diagnostics.py
+  python3 /mnt/c/Users/Unnat/nsbi-internship/sessions/day2/nsbi-tutorial/scripts/run_diagnostics.py
 """
 
 import sys, gc, logging
@@ -24,8 +24,8 @@ from sklearn.preprocessing import StandardScaler
 # ── Paths ─────────────────────────────────────────────────────────────────────
 HOME        = Path.home()
 CHECKPOINTS = HOME / 'checkpoints'
-NSBI_DIR    = Path('/mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial')
-EVENET_REPO = Path('/mnt/c/Users/Unnat/2025-lbnl/EveNet-Lite-main')
+NSBI_DIR    = Path('/mnt/c/Users/Unnat/nsbi-internship/sessions/day2/nsbi-tutorial')
+EVENET_REPO = Path('/mnt/c/Users/Unnat/nsbi-internship/EveNet-Lite-main')
 PLOTS_DIR   = NSBI_DIR / 'plots'
 PLOTS_DIR.mkdir(exist_ok=True)
 
@@ -77,7 +77,7 @@ def load_carl(path):
 
 def load_evenet(path):
     clf = EvenetLiteClassifier(
-        class_labels=['bkg', 'num'], device='cpu', num_workers=0,
+        class_labels=['bkg', 'num'], device='auto', num_workers=0,
         global_input_dim=3, sequential_input_dim=4,
     )
     clf.load_checkpoint(str(path), feature_names=EVENET_FEATURE_NAMES, map_location='cpu')

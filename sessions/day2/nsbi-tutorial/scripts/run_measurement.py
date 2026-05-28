@@ -8,7 +8,7 @@ Reads ~/model_scores.pt (produced by score_both_models.py) and generates:
   2. Model comparison: CARL vs EveNet total NLL — single figure
 
 Run (WSL, nsbi-venv activated):
-  python3 /mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial/scripts/run_measurement.py
+  python3 /mnt/c/Users/Unnat/nsbi-internship/sessions/day2/nsbi-tutorial/scripts/run_measurement.py
 """
 
 import json
@@ -22,8 +22,8 @@ import matplotlib.pyplot as plt
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 HOME      = Path.home()
-DATA_DIR  = Path('/mnt/c/Users/Unnat/2025-lbnl')
-NSBI_DIR  = Path('/mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial')
+DATA_DIR  = Path('/mnt/c/Users/Unnat/nsbi-internship')
+NSBI_DIR  = Path('/mnt/c/Users/Unnat/nsbi-internship/sessions/day2/nsbi-tutorial')
 PLOTS_DIR = NSBI_DIR / 'plots'
 PLOTS_DIR.mkdir(exist_ok=True)
 

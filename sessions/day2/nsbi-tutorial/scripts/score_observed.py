@@ -7,7 +7,7 @@ Calibration factors are derived from bkg_train (slim CSV, same as run_diagnostic
 Output: ~/observed_scores.pt  — used by run_measurement.py
 
 Run (WSL, nsbi-venv activated):
-  python3 /mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial/scripts/score_observed.py
+  python3 /mnt/c/Users/Unnat/nsbi-internship/sessions/day2/nsbi-tutorial/scripts/score_observed.py
 """
 
 import sys, gc, logging
@@ -21,14 +21,14 @@ from sklearn.preprocessing import StandardScaler
 # ── Paths ──────────────────────────────────────────────────────────────────────
 HOME        = Path.home()
 CHECKPOINTS = HOME / 'checkpoints'
-NSBI_DIR    = Path('/mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial')
-EVENET_REPO = Path('/mnt/c/Users/Unnat/2025-lbnl/EveNet-Lite-main')
+NSBI_DIR    = Path('/mnt/c/Users/Unnat/nsbi-internship/sessions/day2/nsbi-tutorial')
+EVENET_REPO = Path('/mnt/c/Users/Unnat/nsbi-internship/EveNet-Lite-main')
 OBS_CSVS    = [
-    Path('/mnt/c/Users/Unnat/2025-lbnl/observed_0.csv'),
-    Path('/mnt/c/Users/Unnat/2025-lbnl/observed_1.csv'),
-    Path('/mnt/c/Users/Unnat/2025-lbnl/observed_2.csv'),
-    Path('/mnt/c/Users/Unnat/2025-lbnl/observed_3.csv'),
-    Path('/mnt/c/Users/Unnat/2025-lbnl/observed_4.csv'),
+    Path('/mnt/c/Users/Unnat/nsbi-internship/observed_0.csv'),
+    Path('/mnt/c/Users/Unnat/nsbi-internship/observed_1.csv'),
+    Path('/mnt/c/Users/Unnat/nsbi-internship/observed_2.csv'),
+    Path('/mnt/c/Users/Unnat/nsbi-internship/observed_3.csv'),
+    Path('/mnt/c/Users/Unnat/nsbi-internship/observed_4.csv'),
 ]
 OUT_PT      = HOME / 'observed_scores.pt'
 
@@ -79,7 +79,7 @@ def load_carl(path):
 
 def load_evenet(path):
     clf = EvenetLiteClassifier(
-        class_labels=['bkg', 'num'], device='cpu', num_workers=0,
+        class_labels=['bkg', 'num'], device='auto', num_workers=0,
         global_input_dim=3, sequential_input_dim=4,
     )
     clf.load_checkpoint(str(path), feature_names=EVENET_FEATURE_NAMES, map_location='cpu')

@@ -206,7 +206,7 @@ if __name__ == '__main__':
 
     clf = EvenetLiteClassifier(
         class_labels=['bkg', 'signal'],
-        device="mps",  # "cpu", "cuda", or "auto"
+        device="auto",  # "cpu", "cuda", or "auto"
         lr=[5e-5, 1e-5, 5e-6],
         weight_decay=1e-2,
         module_lists=[

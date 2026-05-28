@@ -55,7 +55,7 @@ Use EVENET_NORMALIZATION_RULES (printed at the end) to override those to "none".
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Usage (WSL, nsbi-venv activated):
-    python3 /mnt/c/Users/Unnat/2025-lbnl/sessions/day2/nsbi-tutorial/scripts/convert_to_evenet.py
+    python3 /mnt/c/Users/Unnat/nsbi-internship/sessions/day2/nsbi-tutorial/scripts/convert_to_evenet.py
 """
 
 import sys
